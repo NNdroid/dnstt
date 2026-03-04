@@ -1,0 +1,77 @@
+name: Build and Release DNSTT
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch: # 允许在 Actions 页面手动点击触发
+  schedule:
+    - cron: '0 0 * * 0' # 每周日自动运行一次，保持版本为最新（你可以根据需要保留或删除这段）
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 赋予创建 Release 的权限
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Clone, Extract Date and Cross-Compile
+      run: |
+        # 1. 克隆代码
+        git clone https://www.bamsoftware.com/git/dnstt.git
+        cd dnstt
+        
+        # 2. 获取最后一次提交的日期和短哈希
+        # 格式化输出为 YYYY-MM-DD
+        COMMIT_DATE=$(git log -1 --format=%cd --date=format:"%Y-%m-%d")
+        COMMIT_HASH=$(git rev-parse --short HEAD)
+        
+        # 3. 写入 GitHub 环境变量，供后续发布步骤读取
+        echo "RELEASE_NAME=DNSTT Build $COMMIT_DATE" >> $GITHUB_ENV
+        echo "RELEASE_TAG=$COMMIT_DATE-$COMMIT_HASH" >> $GITHUB_ENV
+        
+        # 准备输出目录
+        cd ..
+        mkdir -p release_assets
+        
+        # 4. 开始交叉编译
+        PLATFORMS="linux/amd64 linux/arm64 linux/386 windows/amd64 windows/arm64 windows/386 darwin/amd64 darwin/arm64"
+        
+        cd dnstt
+        for PLATFORM in $PLATFORMS; do
+          GOOS=${PLATFORM%/*}
+          GOARCH=${PLATFORM#*/}
+          echo "Building for $GOOS/$GOARCH..."
+          
+          EXT=""
+          if [ "$GOOS" = "windows" ]; then
+            EXT=".exe"
+          fi
+          
+          # 编译 Server
+          cd dnstt-server
+          GOOS=$GOOS GOARCH=$GOARCH go build -o ../../release_assets/dnstt-server-${GOOS}-${GOARCH}${EXT}
+          cd ..
+          
+          # 编译 Client
+          cd dnstt-client
+          GOOS=$GOOS GOARCH=$GOARCH go build -o ../../release_assets/dnstt-client-${GOOS}-${GOARCH}${EXT}
+          cd ..
+        done
+
+    - name: Upload to GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: release_assets/*
+        # 从环境变量中读取刚才生成的动态 Date 和 Tag
+        tag_name: ${{ env.RELEASE_TAG }}
+        name: ${{ env.RELEASE_NAME }}
+        generate_release_notes: true
