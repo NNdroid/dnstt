@@ -1,43 +1,56 @@
 name: Build and Release DNSTT
 
+permissions:
+  contents: read
+
 on:
-  push:
-    tags:
-      - 'v*' # 触发条件1：当你推送 v 开头的 tag (如 v1.0.0) 时自动执行
-  workflow_dispatch: # 触发条件2：允许你在 GitHub 网页端 Actions 标签页手动点击 "Run workflow" 运行
+  workflow_dispatch: # 允许在 Actions 页面手动点击触发
+  schedule:
+    - cron: '0 0 * * 0' # 每周日自动运行一次，保持版本为最新（你可以根据需要保留或删除这段）
 
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 关键：赋予 GITHUB_TOKEN 创建 Release 和上传文件的权限
+      contents: write # 赋予创建 Release 的权限
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
     - name: Set up Go
-      uses: actions/setup-go@v5 # 更新到较新的 action 版本
+      uses: actions/setup-go@v5
       with:
-        go-version: '1.21' # 建议使用 1.21 或以上
+        go-version: '1.21'
 
-    - name: Clone and Cross-Compile
+    - name: Clone, Extract Date and Cross-Compile
       run: |
+        # 1. 克隆代码
         git clone https://www.bamsoftware.com/git/dnstt.git
+        cd dnstt
+        
+        # 2. 获取最后一次提交的日期和短哈希
+        # 格式化输出为 YYYY-MM-DD
+        COMMIT_DATE=$(git log -1 --format=%cd --date=format:"%Y-%m-%d")
+        COMMIT_HASH=$(git rev-parse --short HEAD)
+        
+        # 3. 写入 GitHub 环境变量，供后续发布步骤读取
+        echo "RELEASE_NAME=DNSTT Build $COMMIT_DATE" >> $GITHUB_ENV
+        echo "RELEASE_TAG=$COMMIT_DATE-$COMMIT_HASH" >> $GITHUB_ENV
+        
+        # 准备输出目录
+        cd ..
         mkdir -p release_assets
         
-        # 定义需要编译的目标系统和架构组合
+        # 4. 开始交叉编译
         PLATFORMS="linux/amd64 linux/arm64 linux/386 windows/amd64 windows/arm64 windows/386 darwin/amd64 darwin/arm64"
         
         cd dnstt
-        
-        # 遍历目标平台进行编译
         for PLATFORM in $PLATFORMS; do
           GOOS=${PLATFORM%/*}
           GOARCH=${PLATFORM#*/}
           echo "Building for $GOOS/$GOARCH..."
           
-          # 给 Windows 系统的可执行文件加上 .exe 后缀
           EXT=""
           if [ "$GOOS" = "windows" ]; then
             EXT=".exe"
@@ -58,7 +71,7 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         files: release_assets/*
-        # 如果是手动触发(workflow_dispatch)，需要指定一个 tag name，如果是 push tag 触发则自动使用该 tag
-        tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'latest-build' }}
-        name: "DNSTT Automated Build"
+        # 从环境变量中读取刚才生成的动态 Date 和 Tag
+        tag_name: ${{ env.RELEASE_TAG }}
+        name: ${{ env.RELEASE_NAME }}
         generate_release_notes: true
