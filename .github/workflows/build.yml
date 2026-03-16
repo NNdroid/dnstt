@@ -1,0 +1,137 @@
+name: Build and Release DNSTT
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch: # 允许在 Actions 页面手动点击触发
+  schedule:
+    - cron: '0 0 * * 0' # 每周日自动运行一次
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    # 新增步骤：检查上游更新并比对当前的 Release
+    - name: Check upstream and compare release
+      id: check
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        
+        # 1. 获取当前仓库最新的 Release Tag (如果没有则返回 none)
+        LATEST_TAG=$(gh release view --json tagName -q ".tagName" || echo "none")
+        
+        # 2. 克隆代码获取最新提交信息
+        git clone https://www.bamsoftware.com/git/dnstt.git
+        cd dnstt
+        
+        COMMIT_DATE=$(git log -1 --format=%cd --date=format:"%Y-%m-%d")
+        COMMIT_HASH=$(git rev-parse --short HEAD)
+        NEW_RELEASE_TAG="$COMMIT_DATE-$COMMIT_HASH"
+        
+        echo "Latest Release Tag: $LATEST_TAG"
+        echo "New Upstream Tag: $NEW_RELEASE_TAG"
+        
+        # 3. 比对 Tag
+        if [ "$NEW_RELEASE_TAG" == "$LATEST_TAG" ]; then
+          echo "No new updates found. Skipping build and release."
+          echo "skip=true" >> $GITHUB_OUTPUT
+        else
+          echo "New updates found. Proceeding with build."
+          echo "skip=false" >> $GITHUB_OUTPUT
+          # 写入环境变量供后续步骤使用
+          echo "RELEASE_NAME=DNSTT Build $COMMIT_DATE" >> $GITHUB_ENV
+          echo "RELEASE_TAG=$NEW_RELEASE_TAG" >> $GITHUB_ENV
+          echo "COMMIT_DATE=$COMMIT_DATE" >> $GITHUB_ENV
+          echo "COMMIT_HASH=$COMMIT_HASH" >> $GITHUB_ENV
+        fi
+
+    - name: Cache Go modules
+      if: steps.check.outputs.skip != 'true'
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/go-build
+        key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-mod-
+
+    - name: Set up Go
+      if: steps.check.outputs.skip != 'true'
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23'
+        go-version-file: 'dnstt/go.mod' # 路径修正，因为在上一步 clone 到了 dnstt 目录
+        check-latest: true
+        token: ${{ github.token }}
+        cache: true
+        cache-dependency-path: 'dnstt/go.sum'
+
+    - name: Cross-Compile
+      if: steps.check.outputs.skip != 'true'
+      run: |
+        cd dnstt
+        
+        # 检查并生成 go.sum 文件
+        if [ ! -f go.sum ]; then
+          go mod tidy
+        fi
+
+        # 准备输出目录
+        mkdir -p release_assets
+        
+        # 开始交叉编译
+        PLATFORMS="linux/amd64 linux/arm64 linux/386 windows/amd64 windows/arm64 windows/386 darwin/amd64 darwin/arm64"
+
+        for PLATFORM in $PLATFORMS; do
+          GOOS=${PLATFORM%/*}
+          GOARCH=${PLATFORM#*/}
+          echo "Building for $GOOS/$GOARCH..."
+          
+          EXT=""
+          if [ "$GOOS" = "windows" ]; then
+            EXT=".exe"
+          fi
+          
+          # 编译 Server
+          (cd dnstt-server && GOOS=$GOOS GOARCH=$GOARCH go build -o ../release_assets/dnstt-server-${GOOS}-${GOARCH}${EXT})
+          
+          # 编译 Client
+          (cd dnstt-client && GOOS=$GOOS GOARCH=$GOARCH go build -o ../release_assets/dnstt-client-${GOOS}-${GOARCH}${EXT})
+        done
+
+    - name: Push code changes
+      if: steps.check.outputs.skip != 'true'
+      run: |
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "actions@github.com"
+        git add .
+        git commit -m "Auto-commit: Update source code and binaries for release ${{ env.COMMIT_HASH }}" || echo "No changes to commit"
+        git push origin HEAD:${GITHUB_REF}  # 将更改推送到当前分支
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Compressed File
+      if: steps.check.outputs.skip != 'true'
+      run: |
+        # 打包源代码
+        tar -czvf dnstt-source-${{ env.COMMIT_DATE }}-${{ env.COMMIT_HASH }}.tar.gz dnstt
+    
+    - name: Upload to GitHub Release
+      if: steps.check.outputs.skip != 'true'
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          dnstt/release_assets/*
+          dnstt-source-${{ env.RELEASE_TAG }}.tar.gz
+        tag_name: ${{ env.RELEASE_TAG }}
+        name: ${{ env.RELEASE_NAME }}
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
